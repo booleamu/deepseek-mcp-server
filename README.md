@@ -14,7 +14,7 @@
 |------|------|:-------:|:------:|
 | `deepseek_chat` | 对话补全 — 代码生成、问答、翻译等 | ✅ | ✅ |
 | `deepseek_reasoner` | 深度推理 (R1) — 返回完整推理过程和最终答案 | ✅ | ✅ |
-| `deepseek_fim` | FIM 代码补全 — 根据代码前后缀生成中间代码 | ✅ | ❌ |
+| `deepseek_fim` | FIM 代码补全 — 根据代码前后缀生成中间代码 | ✅ | ✅(模拟) |
 | `deepseek_multi_turn` | 多轮对话 — 携带完整历史上下文 | ✅ | ✅ |
 | `deepseek_list_models` | 模型列表 — 查询当前可用模型 | ✅ | ✅ |
 | `deepseek_file_analysis` | 文件分析 — 上传文件让 DeepSeek 分析 | ✅(文本) | ✅(原生上传) |
@@ -131,6 +131,32 @@ npm run build
 
 ---
 
+### 对话续接（session_key）
+
+所有对话工具（`deepseek_chat`、`deepseek_reasoner`、`deepseek_multi_turn`）均支持通过 `session_key` 参数续接上一次对话，无需重复发送历史消息：
+
+1. **首次调用**不传 `session_key`，返回结果中会包含一个 `session_key`
+2. **后续调用**传入该 `session_key`，模型即可理解之前的完整上下文
+3. 会话缓存有效期为 30 分钟，过期后自动清理
+
+**工作原理：**
+- **网页版模式**：复用同一个 `chat_session_id`，通过 `parent_message_id` 链接消息链，DeepSeek 服务端自动维护上下文
+- **官方 API 模式**：在服务端缓存完整的 `messages` 历史数组，续接时自动追加并一起发送
+
+```
+# 第 1 轮
+deepseek_chat({ message: "请记住：密码是 abc123" })
+# → 返回 session_key: "xxx-xxx-xxx"
+
+# 第 2 轮（续接）
+deepseek_chat({ message: "密码是什么？", session_key: "xxx-xxx-xxx" })
+# → "密码是 abc123"
+
+# 第 3、4、5… 轮均可继续续接，支持任意多轮
+```
+
+---
+
 ## 工具使用示例
 
 ### 对话补全
@@ -167,6 +193,7 @@ deepseek-mcp-server/
 │   ├── config.ts             # 配置管理（三种认证模式）
 │   ├── client.ts             # 官方 API 客户端（带重试、流式处理）
 │   ├── web-client.ts         # 网页版 API 客户端（PoW 挑战、SSE 解析、文件上传）
+│   ├── session-store.ts     # 会话缓存管理（session_key 续接）
 │   ├── errors.ts             # 统一错误处理
 │   ├── types.ts              # TypeScript 类型定义
 │   ├── sha3_wasm_bg.wasm     # PoW 挑战求解 WASM 模块
@@ -241,9 +268,10 @@ DEEPSEEK_API_KEY=sk-xxx npx @modelcontextprotocol/inspector node dist/index.js
 ## 注意事项
 
 - 网页版模式使用 `chat.deepseek.com` 的内部 API，**非官方接口**，可能随时变更
-- 网页版模式不支持 FIM 代码补全
+- 网页版 FIM 代码补全为对话模拟实现，效果可能不如官方 API 原生 FIM 精准
 - 网页版 User Token 有有效期，过期后需重新获取
 - 每次网页版对话需求解 PoW 挑战，额外约 20-100ms 延迟
+- `session_key` 会话缓存保存在内存中，MCP 服务器重启后失效（30 分钟 TTL）
 - 建议优先使用官方 API Key 以获得最佳稳定性和完整功能
 
 ## 许可证
