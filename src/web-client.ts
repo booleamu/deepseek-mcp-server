@@ -180,12 +180,36 @@ export class DeepSeekWebClient {
     return this.webChat(params);
   }
 
-  /** FIM 代码补全 - 网页版不支持，抛出提示 */
-  async fimCompletion(_params: FimCompletionParams): Promise<FimCompletionResponse> {
-    throw new DeepSeekError(
-      "网页版不支持 FIM 代码补全功能，请使用 API Key 模式",
-      "unsupported_feature",
-    );
+  /** FIM 代码补全 - 网页版通过 chat 接口模拟 */
+  async fimCompletion(params: FimCompletionParams): Promise<FimCompletionResponse> {
+    const fimPrompt = [
+      "你是代码补全工具。根据给定的代码前缀和后缀，只输出应填入中间位置的代码。",
+      "严格要求：",
+      "1. 只输出补全的代码，不要输出任何解释、注释或 markdown 标记",
+      "2. 不要重复前缀或后缀中已有的代码",
+      "3. 确保补全后的完整代码语法正确",
+      "",
+      "代码前缀：",
+      "```",
+      params.prompt,
+      "```",
+      "",
+      params.suffix ? `代码后缀：\n\`\`\`\n${params.suffix}\n\`\`\`` : "",
+    ].filter(Boolean).join("\n");
+
+    const result = await this.webChat({
+      model: "deepseek-chat",
+      messages: [{ role: "user", content: fimPrompt }],
+      max_tokens: params.max_tokens || 256,
+      temperature: params.temperature ?? 0,
+    });
+
+    return {
+      id: `web-fim-${Date.now()}`,
+      object: "text_completion",
+      choices: [{ index: 0, text: result.content, finish_reason: "stop" }],
+      usage: result.usage || { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+    };
   }
 
   /** 模型列表 - 网页版返回固定列表 */
@@ -302,6 +326,75 @@ export class DeepSeekWebClient {
   }
 
   // ============ 核心网页版 API 调用 ============
+
+  /** 带会话续接支持的对话方法 */
+  async webChatWithSession(
+    params: ChatCompletionParams,
+    sessionId?: string,
+    parentMessageId?: number | null,
+  ): Promise<StreamResult & { sessionId: string }> {
+    // 1. 如果没有 sessionId，创建新会话
+    const sid = sessionId || await this.createSession();
+
+    // 2. 获取并求解 PoW 挑战
+    const powResponse = await this.solvePowChallenge();
+
+    // 3. 构建 prompt
+    const prompt = this.messagesToPrompt(params.messages);
+    const isReasoner =
+      params.model === "deepseek-reasoner" || params.model === "deepseek-r1";
+
+    // 4. 发送对话请求
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${this.token}`,
+      Accept: "text/event-stream",
+      "x-client-platform": "web",
+      "x-ds-pow-response": powResponse,
+    };
+
+    const body = {
+      chat_session_id: sid,
+      parent_message_id: parentMessageId !== undefined ? parentMessageId : null,
+      prompt,
+      ref_file_ids: [],
+      thinking_enabled: isReasoner,
+      search_enabled: false,
+    };
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), this.config.timeout);
+
+    try {
+      const res = await fetch(
+        `${this.config.webBaseUrl}/chat/completion`,
+        {
+          method: "POST",
+          headers,
+          body: JSON.stringify(body),
+          signal: controller.signal,
+        },
+      );
+
+      clearTimeout(timeoutId);
+
+      if (!res.ok) {
+        const errorBody = await res.text();
+        throw createApiError(res.status, errorBody);
+      }
+
+      if (!res.body) throw new Error("响应体为空");
+
+      const result = await this.parseSSEStream(res.body);
+      return { ...result, sessionId: sid };
+    } catch (error) {
+      clearTimeout(timeoutId);
+      if (error instanceof DOMException && error.name === "AbortError") {
+        throw new TimeoutError(this.config.timeout);
+      }
+      throw error;
+    }
+  }
 
   /** 核心对话方法 */
   private async webChat(params: ChatCompletionParams): Promise<StreamResult> {
@@ -555,10 +648,12 @@ export class DeepSeekWebClient {
     let reasoning_content = "";
     let totalTokens = 0;
     let lastAppendField = "content"; // 跟踪当前追加目标
+    let messageId: number | undefined;
 
     const reader = body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
+    let currentEvent = "";
 
     while (true) {
       const { done, value } = await reader.read();
@@ -570,6 +665,13 @@ export class DeepSeekWebClient {
 
       for (const line of lines) {
         const trimmed = line.trim();
+
+        // 解析 event: 行
+        if (trimmed.startsWith("event: ")) {
+          currentEvent = trimmed.slice(7);
+          continue;
+        }
+
         if (!trimmed || !trimmed.startsWith("data: ")) continue;
 
         const data = trimmed.slice(6);
@@ -578,23 +680,80 @@ export class DeepSeekWebClient {
         try {
           const chunk = JSON.parse(data);
 
-          // 网页版格式1: {"p":"response/content","o":"APPEND","v":"文本"} (首个chunk)
-          if (chunk.p === "response/content" && chunk.o === "APPEND") {
-            content += chunk.v || "";
-            lastAppendField = "content";
-          } else if (
-            chunk.p === "response/thinking_content" &&
-            chunk.o === "APPEND"
-          ) {
-            reasoning_content += chunk.v || "";
-            lastAppendField = "thinking";
-          } else if (chunk.p === "response/accumulated_token_usage") {
+          // event: ready 中提取 response_message_id
+          if (currentEvent === "ready") {
+            if (chunk.response_message_id != null) {
+              messageId = chunk.response_message_id;
+            }
+            currentEvent = "";
+            continue;
+          }
+
+          // event: update_session / close 等非数据事件，跳过
+          if (currentEvent && currentEvent !== "") {
+            currentEvent = "";
+            continue;
+          }
+          currentEvent = "";
+
+          // 完整数据块：包含 response 对象（首个数据 chunk）
+          if (chunk.v?.response) {
+            const resp = chunk.v.response;
+            if (resp.message_id != null) {
+              messageId = resp.message_id;
+            }
+            // 提取 fragments 中的初始内容
+            if (resp.fragments) {
+              for (const frag of resp.fragments) {
+                if (frag.type === "RESPONSE" && frag.content) {
+                  content += frag.content;
+                  lastAppendField = "content";
+                } else if (frag.type === "THINKING" && frag.content) {
+                  reasoning_content += frag.content;
+                  lastAppendField = "thinking";
+                }
+              }
+            }
+            continue;
+          }
+
+          // 内容追加格式: {"p":"response/fragments/-1/content","o":"APPEND","v":"文本"}
+          // 兼容旧格式: {"p":"response/content","o":"APPEND","v":"文本"}
+          if (chunk.p && chunk.o === "APPEND") {
+            if (
+              chunk.p === "response/content" ||
+              chunk.p?.includes("fragments") && chunk.p?.includes("content")
+            ) {
+              content += chunk.v || "";
+              lastAppendField = "content";
+            } else if (
+              chunk.p === "response/thinking_content" ||
+              chunk.p?.includes("fragments") && chunk.p?.includes("thinking")
+            ) {
+              reasoning_content += chunk.v || "";
+              lastAppendField = "thinking";
+            }
+            continue;
+          }
+
+          // BATCH 更新: {"p":"response","o":"BATCH","v":[{"p":"accumulated_token_usage","v":94},...]}
+          if (chunk.p === "response" && chunk.o === "BATCH" && Array.isArray(chunk.v)) {
+            for (const item of chunk.v) {
+              if (item.p === "accumulated_token_usage") {
+                totalTokens = item.v || 0;
+              }
+            }
+            lastAppendField = "";
+            continue;
+          }
+
+          if (chunk.p === "response/accumulated_token_usage") {
             totalTokens = chunk.v || 0;
             lastAppendField = "";
           } else if (chunk.p === "response/status") {
             lastAppendField = "";
           } else if (
-            // 网页版格式2: {"v":"后续文本"} (后续chunk，无p/o字段)
+            // 后续简化 chunk: {"v":"文本"} (无p/o字段)
             "v" in chunk &&
             !("p" in chunk) &&
             typeof chunk.v === "string"
@@ -606,7 +765,7 @@ export class DeepSeekWebClient {
             }
           }
 
-          // 兼容官方 API 格式 (以防万一)
+          // 兼容官方 API 格式
           if (chunk.choices?.[0]?.delta) {
             const delta = chunk.choices[0].delta;
             if (delta.content) content += delta.content;
@@ -627,6 +786,7 @@ export class DeepSeekWebClient {
         completion_tokens: totalTokens,
         total_tokens: totalTokens,
       },
+      messageId,
     };
   }
 

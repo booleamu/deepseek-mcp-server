@@ -6,6 +6,7 @@ import { loadConfig } from "./config.js";
 import { DeepSeekClient } from "./client.js";
 import { DeepSeekWebClient } from "./web-client.js";
 import { registerAllTools } from "./tools/index.js";
+import { SessionStore } from "./session-store.js";
 
 export interface IDeepSeekClient {
   chatCompletion: typeof DeepSeekClient.prototype.chatCompletion;
@@ -38,7 +39,8 @@ async function main() {
     version: "1.0.0",
   });
 
-  registerAllTools(server, client as DeepSeekClient, config);
+  const sessionStore = new SessionStore();
+  registerAllTools(server, client as DeepSeekClient, config, sessionStore);
 
   const transport = new StdioServerTransport();
   await server.connect(transport);

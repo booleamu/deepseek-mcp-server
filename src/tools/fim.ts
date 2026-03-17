@@ -6,7 +6,7 @@ import { formatErrorResponse } from "../errors.js";
 export function registerFimTool(server: McpServer, client: DeepSeekClient) {
   server.tool(
     "deepseek_fim",
-    "Fill-in-the-Middle 代码补全，根据代码前缀和后缀生成中间代码",
+    "Fill-in-the-Middle 代码补全，根据代码前缀和后缀生成中间代码。API Key 模式使用原生 FIM 接口，网页版模式通过对话模拟实现",
     {
       prefix: z.string().describe("代码前缀（光标位置之前的代码）"),
       suffix: z

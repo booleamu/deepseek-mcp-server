@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { DeepSeekClient } from "../client.js";
 import { DeepSeekConfig } from "../config.js";
+import { SessionStore } from "../session-store.js";
 import { registerChatTool } from "./chat.js";
 import { registerReasonerTool } from "./reasoner.js";
 import { registerFimTool } from "./fim.js";
@@ -12,11 +13,12 @@ export function registerAllTools(
   server: McpServer,
   client: DeepSeekClient,
   config: DeepSeekConfig,
+  sessionStore: SessionStore,
 ) {
-  registerChatTool(server, client);
-  registerReasonerTool(server, client);
+  registerChatTool(server, client, config, sessionStore);
+  registerReasonerTool(server, client, config, sessionStore);
   registerFimTool(server, client);
-  registerMultiTurnTool(server, client);
+  registerMultiTurnTool(server, client, config, sessionStore);
   registerModelsTool(server, client);
   registerFileAnalysisTool(server, client, config);
 

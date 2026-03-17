@@ -96,4 +96,5 @@ export interface StreamResult {
   content: string;
   reasoning_content: string;
   usage?: TokenUsage;
+  messageId?: number;
 }
