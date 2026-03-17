@@ -1,0 +1,37 @@
+{
+  "name": "deepseek-mcp-server",
+  "version": "1.0.0",
+  "description": "MCP Server for DeepSeek API - Chat, Reasoner, FIM code completion",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "deepseek-mcp-server": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc && node -e \"require('fs').copyFileSync('src/sha3_wasm_bg.wasm','dist/sha3_wasm_bg.wasm')\"",
+    "dev": "tsx src/index.ts",
+    "start": "node dist/index.js",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "tsc --noEmit",
+    "clean": "rimraf dist",
+    "prepublishOnly": "npm run clean && npm run build"
+  },
+  "keywords": ["mcp", "deepseek", "ai", "llm", "claude-code"],
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "files": ["dist", "src/sha3_wasm_bg.wasm"],
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.27.1",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "rimraf": "^5.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.0.0",
+    "vitest": "^2.0.0"
+  }
+}
