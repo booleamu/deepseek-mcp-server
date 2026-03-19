@@ -17,7 +17,7 @@
 | `deepseek_fim` | FIM 代码补全 — 根据代码前后缀生成中间代码 | ✅ | ✅(模拟) |
 | `deepseek_multi_turn` | 多轮对话 — 携带完整历史上下文 | ✅ | ✅ |
 | `deepseek_list_models` | 模型列表 — 查询当前可用模型 | ✅ | ✅ |
-| `deepseek_file_analysis` | 文件分析 — 上传文件让 DeepSeek 分析 | ✅(文本) | ✅(原生上传) |
+| `deepseek_file_analysis` | 文件分析 — 上传文件让 DeepSeek 分析（网页版支持多文件） | ✅(文本/单文件) | ✅(原生上传/多文件) |
 
 ### 两种后端
 
@@ -174,13 +174,27 @@ deepseek_reasoner({ message: "证明根号2是无理数", show_reasoning: true }
 deepseek_fim({ prefix: "function add(a, b) {\n  ", suffix: "\n}" })
 ```
 
-### 文件分析
+### 文件分析（单文件）
 ```
 deepseek_file_analysis({
   file_path: "D:/project/design-spec.md",
   instruction: "请分析这份设计文档，指出需要改进的地方"
 })
 ```
+
+### 文件分析（多文件，网页版模式）
+```
+deepseek_file_analysis({
+  file_paths: [
+    "D:/project/src/main.ts",
+    "D:/project/src/utils.ts",
+    "D:/project/src/types.ts"
+  ],
+  instruction: "请对比分析这几个文件的代码质量和一致性"
+})
+```
+
+> **多文件限制（网页版模式）：** 最多 50 个文件，每个文件最大 100MB。API Key 模式仅支持单文件文本分析。
 
 ---
 
@@ -228,7 +242,7 @@ deepseek-mcp-server/
 - 逆向 `chat.deepseek.com` 内部 API
 - **PoW 挑战求解**：使用 DeepSeek 的 WASM 模块 (`DeepSeekHashV1` 算法) 自动求解 Proof-of-Work 防滥用挑战
 - **自定义 SSE 解析**：网页版使用 `{"p":"response/content","o":"APPEND","v":"文本"}` 格式，非标准 OpenAI SSE
-- **原生文件上传**：通过 `/api/v0/file/upload_file` 上传文件，获取 `file_id` 后关联到对话
+- **原生文件上传**：通过 `/api/v0/file/upload_file` 上传文件，获取 `file_id` 后关联到对话，支持多文件（最多 50 个，每个最大 100MB）
 
 ### 网页版对话完整流程
 ```
