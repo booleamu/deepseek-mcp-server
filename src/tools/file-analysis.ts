@@ -1,6 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { readFileSync } from "fs";
+import { readFileSync, statSync } from "fs";
 import { basename, extname } from "path";
 import { DeepSeekClient } from "../client.js";
 import { DeepSeekWebClient } from "../web-client.js";
@@ -15,37 +15,75 @@ export function registerFileAnalysisTool(
   server.tool(
     "deepseek_file_analysis",
     config.authMode === "api_key"
-      ? "读取文件内容并发送给 DeepSeek 分析（API Key 模式：仅支持文本文件，内容以文本形式发送）"
-      : "上传文件到 DeepSeek 进行分析（网页版模式：支持 PDF/Word/代码/文本等多种格式，通过原生文件上传接口处理）",
+      ? "读取文件内容并发送给 DeepSeek 分析（API Key 模式：仅支持单个文本文件，内容以文本形式发送）"
+      : "上传文件到 DeepSeek 进行分析（网页版模式：支持 PDF/Word/代码/文本等多种格式，通过原生文件上传接口处理，支持多文件，最多 50 个，每个最大 100MB）",
     {
-      file_path: z.string().describe("要分析的文件的绝对路径"),
+      file_path: z.string().describe("要分析的文件的绝对路径（单文件时使用）"),
+      file_paths: z.array(z.string()).optional().describe(
+        "要分析的多个文件的绝对路径数组（多文件时使用，最多 50 个，仅网页版模式支持）",
+      ),
       instruction: z.string().optional().describe(
         "分析指令，告诉 DeepSeek 如何分析这个文件。默认为'请分析这个文件的内容，指出问题和改进建议'",
       ),
       model: z.enum(["deepseek-chat", "deepseek-reasoner"]).optional()
         .describe("使用的模型，默认 deepseek-chat"),
     },
-    async ({ file_path, instruction, model }) => {
+    async ({ file_path, file_paths, instruction, model }) => {
       try {
-        const fileName = basename(file_path);
         const defaultInstruction = "请分析这个文件的内容，指出存在的问题和改进建议";
         const userInstruction = instruction || defaultInstruction;
 
+        // 合并 file_path 和 file_paths
+        const allPaths = [...(file_paths || [])];
+        if (file_path && !allPaths.includes(file_path)) {
+          allPaths.unshift(file_path);
+        }
+
+        if (allPaths.length === 0) {
+          return {
+            content: [{
+              type: "text" as const,
+              text: "[错误] 请提供至少一个文件路径（file_path 或 file_paths）",
+            }],
+            isError: true,
+          };
+        }
+
         if (config.authMode !== "api_key") {
-          // ====== 网页版模式：真正上传文件 ======
-          return await handleWebUpload(
-            client as unknown as DeepSeekWebClient,
-            file_path,
-            fileName,
-            userInstruction,
-            model || "deepseek-chat",
-          );
+          // ====== 网页版模式 ======
+          if (allPaths.length === 1) {
+            // 单文件：保持原有逻辑
+            return await handleWebUpload(
+              client as unknown as DeepSeekWebClient,
+              allPaths[0],
+              basename(allPaths[0]),
+              userInstruction,
+              model || "deepseek-chat",
+            );
+          } else {
+            // 多文件
+            return await handleWebMultiUpload(
+              client as unknown as DeepSeekWebClient,
+              allPaths,
+              userInstruction,
+              model || "deepseek-chat",
+            );
+          }
         } else {
-          // ====== API Key 模式：读取文本内容发送 ======
+          // ====== API Key 模式：仅支持单文件 ======
+          if (allPaths.length > 1) {
+            return {
+              content: [{
+                type: "text" as const,
+                text: "[不支持] API Key 模式不支持多文件分析。请切换为网页版模式（DEEPSEEK_USER_TOKEN）或逐个分析文件。",
+              }],
+              isError: true,
+            };
+          }
           return await handleApiKeyMode(
             client,
-            file_path,
-            fileName,
+            allPaths[0],
+            basename(allPaths[0]),
             userInstruction,
             model || "deepseek-chat",
           );
@@ -57,7 +95,7 @@ export function registerFileAnalysisTool(
   );
 }
 
-/** 网页版模式：通过 upload_file 接口上传，再关联到对话 */
+/** 网页版模式：通过 upload_file 接口上传单个文件 */
 async function handleWebUpload(
   client: DeepSeekWebClient,
   filePath: string,
@@ -72,6 +110,49 @@ async function handleWebUpload(
     content: [{
       type: "text" as const,
       text: `## 📄 文件分析: ${fileName}（文件上传模式）\n\n${result.content}\n\n---\n📊 Token: ${result.usage?.total_tokens || 0}(总计) | 模型: ${model}`,
+    }],
+  };
+}
+
+/** 网页版模式：上传多个文件并分析 */
+async function handleWebMultiUpload(
+  client: DeepSeekWebClient,
+  filePaths: string[],
+  instruction: string,
+  model: string,
+) {
+  if (filePaths.length > 50) {
+    return {
+      content: [{
+        type: "text" as const,
+        text: `[错误] 文件数量超过上限: ${filePaths.length}/50`,
+      }],
+      isError: true,
+    };
+  }
+
+  const files: Array<{ buffer: Buffer; name: string }> = [];
+  for (const fp of filePaths) {
+    const stat = statSync(fp);
+    if (stat.size > 100 * 1024 * 1024) {
+      return {
+        content: [{
+          type: "text" as const,
+          text: `[错误] 文件 ${basename(fp)} 超过 100MB 大小限制 (${(stat.size / 1024 / 1024).toFixed(1)}MB)`,
+        }],
+        isError: true,
+      };
+    }
+    files.push({ buffer: readFileSync(fp), name: basename(fp) });
+  }
+
+  const fileNames = files.map((f) => f.name).join(", ");
+  const result = await client.chatWithFiles(files, instruction, model);
+
+  return {
+    content: [{
+      type: "text" as const,
+      text: `## 📄 多文件分析 (${files.length} 个文件)（文件上传模式）\n\n**文件列表**: ${fileNames}\n\n${result.content}\n\n---\n📊 Token: ${result.usage?.total_tokens || 0}(总计) | 模型: ${model}`,
     }],
   };
 }

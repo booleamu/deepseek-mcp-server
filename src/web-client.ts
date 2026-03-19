@@ -223,17 +223,11 @@ export class DeepSeekWebClient {
     };
   }
 
-  /** 上传文件并发起带文件的对话 */
-  async chatWithFile(
+  /** 上传单个文件并返回文件 ID */
+  private async uploadSingleFile(
     fileBuffer: Buffer,
     fileName: string,
-    prompt: string,
-    model: string = "deepseek-chat",
-  ): Promise<StreamResult> {
-    // 1. 创建会话
-    const sessionId = await this.createSession();
-
-    // 2. 上传文件（需要 PoW）
+  ): Promise<string> {
     const uploadPow = await this.solvePowChallenge("/api/v0/file/upload_file");
     const fd = new FormData();
     fd.append("file", new Blob([new Uint8Array(fileBuffer)]), fileName);
@@ -254,18 +248,23 @@ export class DeepSeekWebClient {
     const uploadData = await uploadRes.json();
     if (uploadData.code !== 0 || !uploadData.data?.biz_data?.id) {
       throw new DeepSeekError(
-        `文件上传失败: ${uploadData.msg || JSON.stringify(uploadData)}`,
+        `文件上传失败 (${fileName}): ${uploadData.msg || JSON.stringify(uploadData)}`,
         "file_upload_error",
       );
     }
 
     const fileId = uploadData.data.biz_data.id;
     console.error(`[DeepSeek MCP] 文件上传成功: ${fileId} (${fileName})`);
+    return fileId;
+  }
 
-    // 3. 等待文件解析完成（轮询，最多 30 秒）
-    await this.waitForFileParsed(fileId);
-
-    // 4. 获取对话 PoW 并发送带文件的对话
+  /** 发起带文件的对话（内部共用） */
+  private async chatWithFileIds(
+    fileIds: string[],
+    prompt: string,
+    model: string,
+    sessionId: string,
+  ): Promise<StreamResult> {
     const chatPow = await this.solvePowChallenge("/api/v0/chat/completion");
     const isReasoner = model === "deepseek-reasoner" || model === "deepseek-r1";
 
@@ -284,7 +283,7 @@ export class DeepSeekWebClient {
           chat_session_id: sessionId,
           parent_message_id: null,
           prompt,
-          ref_file_ids: [fileId],
+          ref_file_ids: fileIds,
           thinking_enabled: isReasoner,
           search_enabled: false,
         }),
@@ -301,6 +300,54 @@ export class DeepSeekWebClient {
 
     if (!chatRes.body) throw new Error("响应体为空");
     return await this.parseSSEStream(chatRes.body);
+  }
+
+  /** 上传单个文件并发起带文件的对话 */
+  async chatWithFile(
+    fileBuffer: Buffer,
+    fileName: string,
+    prompt: string,
+    model: string = "deepseek-chat",
+  ): Promise<StreamResult> {
+    const sessionId = await this.createSession();
+    const fileId = await this.uploadSingleFile(fileBuffer, fileName);
+    await this.waitForFileParsed(fileId);
+    return this.chatWithFileIds([fileId], prompt, model, sessionId);
+  }
+
+  /** 上传多个文件并发起带文件的对话（最多 50 个） */
+  async chatWithFiles(
+    files: Array<{ buffer: Buffer; name: string }>,
+    prompt: string,
+    model: string = "deepseek-chat",
+  ): Promise<StreamResult> {
+    if (files.length === 0) {
+      throw new DeepSeekError("至少需要一个文件", "file_upload_error");
+    }
+    if (files.length > 50) {
+      throw new DeepSeekError(
+        `文件数量超过上限: ${files.length}/50`,
+        "file_upload_error",
+      );
+    }
+
+    const sessionId = await this.createSession();
+
+    // 逐个上传文件并收集 fileId
+    const fileIds: string[] = [];
+    for (const file of files) {
+      const fileId = await this.uploadSingleFile(file.buffer, file.name);
+      fileIds.push(fileId);
+    }
+
+    // 等待所有文件解析完成（并行等待）
+    await Promise.all(fileIds.map((id) => this.waitForFileParsed(id)));
+
+    console.error(
+      `[DeepSeek MCP] 全部 ${fileIds.length} 个文件上传并解析完成`,
+    );
+
+    return this.chatWithFileIds(fileIds, prompt, model, sessionId);
   }
 
   /** 等待文件解析完成 */
